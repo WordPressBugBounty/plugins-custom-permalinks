@@ -4,7 +4,7 @@ Tags: permalink, url, link, address, redirect
 Requires at least: 5.0
 Requires PHP: 5.6
 Tested up to: 6.8
-Stable tag: 3.1.1
+Stable tag: 3.1.2
 License: GPLv3
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -80,6 +80,11 @@ You have two ways to install Custom Permalinks:
 3.  Activate Custom Permalinks through the "Plugins" menu in your WordPress dashboard.
 
 == Changelog ==
+
+= 3.1.2 - Sep 24, 2025 =
+
+* Bug:
+  * [Prevent adding slash if `home_url()` contains one](https://github.com/samiahmedsiddiqui/custom-permalinks/pull/136)
 
 = 3.1.1 - Sep 19, 2025 =
 
