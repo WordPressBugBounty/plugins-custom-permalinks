@@ -171,8 +171,21 @@ class Custom_Permalinks_Frontend {
 				$trailing_permalink,
 				$language_code
 			);
+
+			// A non-string return here would trip a PHP warning below and corrupt a REST API JSON response.
+			if ( ! is_string( $permalink ) || '' === $permalink ) {
+				$permalink = $trailing_permalink;
+			}
+
 			$site_url  = site_url();
 			$wpml_href = str_replace( $site_url, '', $permalink );
+
+			// Collapse a duplicated language directory, e.g. `/de/de/slug`, back to a single `/{lang}/` prefix.
+			$duplicate_prefix = '/' . $language_code . '/' . $language_code . '/';
+			if ( 0 === strpos( $wpml_href, $duplicate_prefix ) ) {
+				$permalink = $site_url . '/' . $language_code . '/' . substr( $wpml_href, strlen( $duplicate_prefix ) );
+			}
+
 			if ( 0 === strpos( $wpml_href, '//' ) ) {
 				if ( 0 !== strpos( $wpml_href, '//' . $language_code . '/' ) ) {
 					$permalink = $site_url . '/' . $language_code . '/' . $custom_permalink;
@@ -180,9 +193,95 @@ class Custom_Permalinks_Frontend {
 			}
 		} else {
 			$permalink = apply_filters( 'wpml_permalink', $trailing_permalink );
+			if ( ! is_string( $permalink ) || '' === $permalink ) {
+				$permalink = $trailing_permalink;
+			}
 		}
 
 		return $permalink;
+	}
+
+	/**
+	 * Resolve the WPML-translated post/page for a permalink lookup.
+	 *
+	 * @since 3.2.0
+	 * @access private
+	 *
+	 * @param int    $element_id   Post/Page ID being linked to.
+	 * @param string $element_type Element type (`post`, `page`, or a custom post type).
+	 *
+	 * @return array Translated (or original) post/page ID and its custom permalink.
+	 */
+	private function wpml_translated_permalink( $element_id, $element_type ) {
+		$custom_permalink = get_post_meta( $element_id, 'custom_permalink', true );
+
+		if ( class_exists( 'SitePress' ) ) {
+			$current_language = apply_filters( 'wpml_current_language', null );
+			$translated_id    = apply_filters(
+				'wpml_object_id',
+				$element_id,
+				$element_type,
+				true,
+				$current_language
+			);
+
+			if ( $translated_id && (int) $translated_id !== (int) $element_id ) {
+				$translated_permalink = get_post_meta( $translated_id, 'custom_permalink', true );
+				if ( $translated_permalink ) {
+					$element_id       = $translated_id;
+					$custom_permalink = $translated_permalink;
+				}
+			}
+		}
+
+		return array( $element_id, $custom_permalink );
+	}
+
+	/**
+	 * Get the current WPML/Polylang language code, regardless of negotiation type.
+	 *
+	 * @since 3.2.0
+	 * @access private
+	 *
+	 * @return string Current language code, or empty string if none.
+	 */
+	private function current_language() {
+		$current_language = '';
+
+		if ( class_exists( 'SitePress' ) ) {
+			$current_language = apply_filters( 'wpml_current_language', null );
+		} elseif ( defined( 'POLYLANG_VERSION' ) && function_exists( 'pll_current_language' ) ) {
+			$current_language = pll_current_language();
+		}
+
+		return $current_language ? $current_language : '';
+	}
+
+	/**
+	 * Search a permalink in the posts table, preferring a post matching the
+	 * current language, and falling back to a language-agnostic lookup.
+	 *
+	 * @since 3.2.0
+	 * @access private
+	 *
+	 * @param string $requested_url Requested URL.
+	 *
+	 * @return object|null Containing Post ID, Permalink, Post Type, and Post status
+	 *                     if URL matched otherwise returns null.
+	 */
+	private function query_post_current_language( $requested_url ) {
+		$current_language = $this->current_language();
+		$posts            = null;
+
+		if ( ! empty( $current_language ) ) {
+			$posts = $this->query_post_language( $requested_url, $current_language );
+		}
+
+		if ( ! $posts ) {
+			$posts = $this->query_post( $requested_url );
+		}
+
+		return $posts;
 	}
 
 	/**
@@ -414,43 +513,10 @@ class Custom_Permalinks_Frontend {
 			$request = $cp_form->check_conflicts( $request );
 		}
 
-		$current_language  = '';
-		$different_domain  = false;
 		$found_permalink   = '';
 		$permalink_matched = false;
 		$request_no_slash  = preg_replace( '@/+@', '/', trim( $request, '/' ) );
-
-		if ( class_exists( 'SitePress' ) ) {
-			$wpml_lang_format = apply_filters(
-				'wpml_setting',
-				0,
-				'language_negotiation_type'
-			);
-
-			// Different domain per language.
-			if ( 2 === intval( $wpml_lang_format ) ) {
-				$current_language = apply_filters( 'wpml_current_language', null );
-				$different_domain = true;
-			}
-		} elseif ( defined( 'POLYLANG_VERSION' ) ) {
-			$polylang_config = get_option( 'polylang' );
-			if ( 1 === $polylang_config['force_lang'] ) {
-				$current_language = pll_current_language();
-				$different_domain = true;
-			}
-		}
-
-		// Different domain per language.
-		if ( $different_domain && ! empty( $current_language ) ) {
-			$posts = $this->query_post_language( $request_no_slash, $current_language );
-
-			// Backward compatibility.
-			if ( ! $posts ) {
-				$posts = $this->query_post( $request_no_slash );
-			}
-		} else {
-			$posts = $this->query_post( $request_no_slash );
-		}
+		$posts             = $this->query_post_current_language( $request_no_slash );
 
 		if ( $posts ) {
 			/*
@@ -553,6 +619,22 @@ class Custom_Permalinks_Frontend {
 			 */
 			if ( ! empty( $found_permalink ) && $found_permalink !== $request ) {
 				$this->parse_request_status = false;
+
+				/*
+				 * Force redirect if requested permalink and found permalink only
+				 * differs by trailing slash.
+				 */
+				$permalink_without_trailing = rtrim( $found_permalink, '/' );
+				if ( $permalink_without_trailing === $request
+					|| $permalink_without_trailing . '/' === $request
+				) {
+					$avoid_redirect = apply_filters( 'custom_permalinks_avoid_redirect', $request );
+					if ( ! is_bool( $avoid_redirect ) || ! $avoid_redirect ) {
+						$this->safe_redirect( $found_permalink );
+
+						return $query;
+					}
+				}
 			}
 
 			$original_url = str_replace( '//', '/', $original_url );
@@ -710,6 +792,56 @@ class Custom_Permalinks_Frontend {
 	}
 
 	/**
+	 * Redirect a request for the original permalink to the custom one,
+	 * preserving any extra path (e.g. a WooCommerce endpoint) after it.
+	 *
+	 * @since 3.2.0
+	 * @access private
+	 *
+	 * @param string $request            Requested path with query string stripped.
+	 * @param string $custom_permalink   Custom permalink, or empty if none set.
+	 * @param string $original_permalink Default/original permalink.
+	 *
+	 * @return void
+	 */
+	private function redirect_to_custom_permalink( $request, $custom_permalink, $original_permalink ) {
+		if ( ! $custom_permalink ) {
+			return;
+		}
+
+		$custom_length = strlen( $custom_permalink );
+		if ( substr( $request, 0, $custom_length ) === $custom_permalink
+			&& $request !== $custom_permalink . '/'
+		) {
+			// Already on the custom permalink, optionally with an endpoint appended.
+			return;
+		}
+
+		// Request doesn't match permalink - redirect.
+		$url             = $custom_permalink;
+		$original_length = strlen( $original_permalink );
+		if ( substr( $request, 0, $original_length ) === $original_permalink
+			&& trim( $request, '/' ) !== trim( $original_permalink, '/' )
+		) {
+			// This is the original link; we can use this URL to derive the new one.
+			$url = preg_replace(
+				'@//*@',
+				'/',
+				str_replace(
+					trim( $original_permalink, '/' ),
+					trim( $custom_permalink, '/' ),
+					$request
+				)
+			);
+			$url = preg_replace( '@([^?]*)&@', '\1?', $url );
+		}
+
+		// Append any query component.
+		$url .= strstr( $this->request_uri, '?' );
+		$this->safe_redirect( $url );
+	}
+
+	/**
 	 * Action to redirect to the custom permalink.
 	 *
 	 * @since 0.1.0
@@ -770,10 +902,16 @@ class Custom_Permalinks_Frontend {
 		// Redirect original post permalink.
 		if ( ! empty( $get_post_id ) ) {
 			$custom_permalink = get_post_meta( $get_post_id, 'custom_permalink', true );
-			if ( ! empty( $custom_permalink ) ) {
-				// Append any query component.
-				$custom_permalink .= strstr( $this->request_uri, '?' );
-				$this->safe_redirect( $custom_permalink );
+			if ( $custom_permalink ) {
+				$original_permalink = 'page' === get_post_type( $get_post_id )
+					? $this->original_page_link( $get_post_id )
+					: $this->original_post_link( $get_post_id );
+
+				$this->redirect_to_custom_permalink(
+					$request,
+					$custom_permalink,
+					$original_permalink
+				);
 			}
 		} else {
 			if ( defined( 'POLYLANG_VERSION' ) ) {
@@ -782,7 +920,7 @@ class Custom_Permalinks_Frontend {
 			}
 
 			$request_no_slash = preg_replace( '@/+@', '/', trim( $request, '/' ) );
-			$posts            = $this->query_post( $request_no_slash );
+			$posts            = $this->query_post_current_language( $request_no_slash );
 
 			if ( ! isset( $posts[0]->ID ) || ! isset( $posts[0]->meta_value )
 				|| empty( $posts[0]->meta_value )
@@ -806,43 +944,19 @@ class Custom_Permalinks_Frontend {
 						$original_permalink = $this->original_post_link( $post->ID );
 					}
 				} elseif ( is_tag() || is_category() ) {
-					$the_term           = $wp_query->get_queried_object();
-					$custom_permalink   = $this->term_permalink( $the_term->term_id );
-					$original_permalink = $this->original_term_link( $the_term->term_id );
+					$the_term = $wp_query->get_queried_object();
+					if ( isset( $the_term, $the_term->term_id ) ) {
+						$custom_permalink   = $this->term_permalink( $the_term->term_id );
+						$original_permalink = $this->original_term_link( $the_term->term_id );
+					}
 				}
 			}
 
-			$custom_length = strlen( $custom_permalink );
-			if ( $custom_permalink
-				&& (
-					substr( $request, 0, $custom_length ) !== $custom_permalink
-					|| $request === $custom_permalink . '/'
-				)
-			) {
-				// Request doesn't match permalink - redirect.
-				$url             = $custom_permalink;
-				$original_length = strlen( $original_permalink );
-
-				if ( substr( $request, 0, $original_length ) === $original_permalink
-					&& trim( $request, '/' ) !== trim( $original_permalink, '/' )
-				) {
-					// This is the original link; we can use this URL to derive the new one.
-					$url = preg_replace(
-						'@//*@',
-						'/',
-						str_replace(
-							trim( $original_permalink, '/' ),
-							trim( $custom_permalink, '/' ),
-							$request
-						)
-					);
-					$url = preg_replace( '@([^?]*)&@', '\1?', $url );
-				}
-
-				// Append any query component.
-				$url .= strstr( $this->request_uri, '?' );
-				$this->safe_redirect( $url );
-			}
+			$this->redirect_to_custom_permalink(
+				$request,
+				$custom_permalink,
+				$original_permalink
+			);
 		}
 	}
 
@@ -857,18 +971,22 @@ class Custom_Permalinks_Frontend {
 	 * @return string customized Post Permalink.
 	 */
 	public function custom_post_link( $permalink, $post ) {
-		$custom_permalink = get_post_meta( $post->ID, 'custom_permalink', true );
-		if ( $custom_permalink ) {
-			$post_type = 'post';
-			if ( isset( $post->post_type ) ) {
-				$post_type = $post->post_type;
-			}
+		$post_type = 'post';
+		if ( isset( $post->post_type ) ) {
+			$post_type = $post->post_type;
+		}
 
+		list( $post_id, $custom_permalink ) = $this->wpml_translated_permalink(
+			$post->ID,
+			$post_type
+		);
+
+		if ( $custom_permalink ) {
 			$language_code = apply_filters(
 				'wpml_element_language_code',
 				null,
 				array(
-					'element_id'   => $post->ID,
+					'element_id'   => $post_id,
 					'element_type' => $post_type,
 				)
 			);
@@ -910,7 +1028,11 @@ class Custom_Permalinks_Frontend {
 	 * @return string customized Page Permalink.
 	 */
 	public function custom_page_link( $permalink, $page ) {
-		$custom_permalink = get_post_meta( $page, 'custom_permalink', true );
+		list( $page, $custom_permalink ) = $this->wpml_translated_permalink(
+			$page,
+			'page'
+		);
+
 		if ( $custom_permalink ) {
 			$language_code = apply_filters(
 				'wpml_element_language_code',
@@ -965,7 +1087,7 @@ class Custom_Permalinks_Frontend {
 		}
 
 		$customized_permalink = preg_replace( '@/+@', '/', trim( $customized_permalink, '/' ) );
-		$posts                = $this->query_post( $customized_permalink );
+		$posts                = $this->query_post_current_language( $customized_permalink );
 		if ( is_array( $posts ) && ! empty( $posts ) ) {
 			if ( 'draft' === $posts[0]->post_status
 				|| 'pending' === $posts[0]->post_status
