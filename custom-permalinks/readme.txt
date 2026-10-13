@@ -4,7 +4,7 @@ Tags: permalink, custom url, slug, redirect, seo
 Requires at least: 5.9
 Requires PHP: 7.4
 Tested up to: 7.1
-Stable tag: 3.3.2
+Stable tag: 3.3.3
 License: GPLv3
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -167,6 +167,11 @@ Deactivating the plugin keeps all your saved custom permalinks in the database â
 5. Set a custom permalink for a category, tag, or custom taxonomy term on its edit screen.
 
 == Changelog ==
+
+= 3.3.3 - Oct 13, 2026 =
+
+* Bug:
+  * Fixed an [infinite redirect loop](https://github.com/samiahmedsiddiqui/custom-permalinks/issues/208) on percent-encoded custom permalinks without a trailing slash (e.g. Japanese), a regression in 3.3.0.
 
 = 3.3.2 - Oct 11, 2026 =
 
